@@ -8,6 +8,7 @@ import "./interfaces/IMixEmitter.sol";
 import "./interfaces/IMix.sol";
 import "./interfaces/ITurntables.sol";
 import "./interfaces/ILP.sol";
+import "./interfaces/IRewardToken.sol";
 
 contract TurntableLPListeners is Ownable, ITurntableLPListeners {
     using SafeMath for uint256;
@@ -18,6 +19,8 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
     uint256 public pid;
     ITurntables public turntables;
     ILP public lp;
+
+    address[] public rewardTokens;
 
     constructor(
         IMixEmitter _mixEmitter,
@@ -30,18 +33,36 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
         pid = _pid;
         turntables = _turntables;
         lp = _lp;
+        rewardTokens.push(address(mix));
     }
 
-    uint256 private currentBalance = 0;
-    uint256 public totalShares = 0;
-    mapping(uint256 => mapping(address => uint256)) public shares;
+    function addRewardToken(address token) external onlyOwner {
+        rewardTokens.push(token);
+    }
+
+    function removeRewardToken(address token) external onlyOwner {
+        uint256 length = rewardTokens.length;
+        for (uint256 i = 0; i < length; i = i.add(1)) {
+            if (rewardTokens[i] == token) {
+                rewardTokens[i] = rewardTokens[length.sub(1)];
+                rewardTokens.length -= 1;
+                break;
+            }
+        }
+    }
 
     uint256 public turntableFee = 3000;
 
+    uint256 public totalShares = 0;
+    mapping(uint256 => uint256) public turntableShares;
+    mapping(uint256 => mapping(address => uint256)) public shares;
+
     uint256 private constant pointsMultiplier = 2**128;
-    uint256 private pointsPerShare = 0;
-    mapping(uint256 => mapping(address => int256)) private pointsCorrection;
-    mapping(uint256 => mapping(address => uint256)) private claimed;
+
+    mapping(address => uint256) private currentBalances;
+    mapping(address => uint256) private pointsPerShares;
+    mapping(uint256 => mapping(address => mapping(address => int256))) private pointsCorrections;
+    mapping(uint256 => mapping(address => mapping(address => uint256))) private claimed;
 
     function setTurntableFee(uint256 fee) external onlyOwner {
         require(fee < 1e4);
@@ -52,36 +73,41 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
     function updateBalance() private {
         if (totalShares > 0) {
             mixEmitter.updatePool(pid);
-            uint256 balance = mix.balanceOf(address(this));
-            uint256 value = balance.sub(currentBalance);
-            if (value > 0) {
-                pointsPerShare = pointsPerShare.add(value.mul(pointsMultiplier).div(totalShares));
-                emit Distribute(msg.sender, value);
+            lp.claimReward();
+            uint256 length = rewardTokens.length;
+            for (uint256 i = 0; i < length; i = i.add(1)) {
+                address rewardToken = rewardTokens[i];
+                uint256 balance = IRewardToken(rewardToken).balanceOf(address(this));
+                uint256 value = balance.sub(currentBalances[rewardToken]);
+                if (value > 0) {
+                    pointsPerShares[rewardToken] = pointsPerShares[rewardToken].add(value.mul(pointsMultiplier).div(totalShares));
+                    emit Distribute(msg.sender, value);
+                }
+                currentBalances[rewardToken] = balance;
             }
-            currentBalance = balance;
         } else {
             mixEmitter.updatePool(pid);
             uint256 balance = mix.balanceOf(address(this));
-            uint256 value = balance.sub(currentBalance);
+            uint256 value = balance.sub(currentBalances[address(mix)]);
             if (value > 0) mix.burn(value);
         }
     }
 
     function claimedOf(uint256 turntableId, address owner, address token) public view returns (uint256) {
-        return claimed[turntableId][owner];
+        return claimed[turntableId][owner][token];
     }
 
     function accumulativeOf(uint256 turntableId, address owner, address token) public view returns (uint256) {
-        uint256 _pointsPerShare = pointsPerShare;
+        uint256 _pointsPerShare = pointsPerShares[token];
         if (totalShares > 0) {
-            uint256 balance = mixEmitter.pendingMix(pid).add(mix.balanceOf(address(this)));
-            uint256 value = balance.sub(currentBalance);
+            uint256 balance = token == address(mix) ? mixEmitter.pendingMix(pid).add(mix.balanceOf(address(this))) : IRewardToken(token).balanceOf(address(this));
+            uint256 value = balance.sub(currentBalances[token]);
             if (value > 0) {
                 _pointsPerShare = _pointsPerShare.add(value.mul(pointsMultiplier).div(totalShares));
             }
             return
                 uint256(
-                    int256(_pointsPerShare.mul(shares[turntableId][owner])).add(pointsCorrection[turntableId][owner])
+                    int256(_pointsPerShare.mul(shares[turntableId][owner])).add(pointsCorrections[turntableId][owner][token])
                 ).div(pointsMultiplier);
         }
         return 0;
@@ -89,30 +115,32 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
 
     function claimableOf(uint256 turntableId, address owner, address token) external view returns (uint256) {
         return
-            accumulativeOf(turntableId, owner, token).sub(claimed[turntableId][owner]).mul(uint256(1e4).sub(turntableFee)).div(
+            accumulativeOf(turntableId, owner, token).sub(claimed[turntableId][owner][token]).mul(uint256(1e4).sub(turntableFee)).div(
                 1e4
             );
     }
 
     function _accumulativeOf(uint256 turntableId, address owner, address token) private view returns (uint256) {
         return
-            uint256(int256(pointsPerShare.mul(shares[turntableId][owner])).add(pointsCorrection[turntableId][owner]))
+            uint256(int256(pointsPerShares[token].mul(shares[turntableId][owner])).add(pointsCorrections[turntableId][owner][token]))
                 .div(pointsMultiplier);
     }
 
     function _claimableOf(uint256 turntableId, address owner, address token) private view returns (uint256) {
-        return _accumulativeOf(turntableId, owner, token).sub(claimed[turntableId][owner]);
+        return _accumulativeOf(turntableId, owner, token).sub(claimed[turntableId][owner][token]);
     }
 
     function claim(uint256[] calldata turntableIds, address token) external {
         updateBalance();
+
         uint256 length = turntableIds.length;
         uint256 totalClaimable = 0;
+
         for (uint256 i = 0; i < length; i = i + 1) {
             uint256 turntableId = turntableIds[i];
             uint256 claimable = _claimableOf(turntableId, msg.sender, token);
             if (claimable > 0) {
-                claimed[turntableId][msg.sender] = claimed[turntableId][msg.sender].add(claimable);
+                claimed[turntableId][msg.sender][token] = claimed[turntableId][msg.sender][token].add(claimable);
                 emit Claim(turntableId, msg.sender, token, claimable);
                 uint256 fee = claimable.mul(turntableFee).div(1e4);
                 if (turntables.exists(turntableId)) {
@@ -124,17 +152,24 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
                 totalClaimable = totalClaimable.add(claimable);
             }
         }
-        currentBalance = currentBalance.sub(totalClaimable);
+        currentBalances[token] = currentBalances[token].sub(totalClaimable);
     }
 
     function listen(uint256 turntableId, uint256 amount) external {
         require(turntables.exists(turntableId));
         updateBalance();
+
         totalShares = totalShares.add(amount);
         shares[turntableId][msg.sender] = shares[turntableId][msg.sender].add(amount);
-        pointsCorrection[turntableId][msg.sender] = pointsCorrection[turntableId][msg.sender].sub(
-            int256(pointsPerShare.mul(amount))
-        );
+        turntableShares[turntableId] = turntableShares[turntableId].add(amount);
+
+        uint256 length = rewardTokens.length;
+        for (uint256 i = 0; i < length; i = i.add(1)) {
+            address rewardToken = rewardTokens[i];
+            pointsCorrections[turntableId][msg.sender][rewardToken] = pointsCorrections[turntableId][msg.sender][rewardToken].sub(
+                int256(pointsPerShares[rewardToken].mul(amount))
+            );
+        }
 
         lp.transferFrom(msg.sender, address(this), amount);
         emit Listen(turntableId, msg.sender, amount);
@@ -142,11 +177,18 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
 
     function unlisten(uint256 turntableId, uint256 amount) external {
         updateBalance();
+
         totalShares = totalShares.sub(amount);
         shares[turntableId][msg.sender] = shares[turntableId][msg.sender].sub(amount);
-        pointsCorrection[turntableId][msg.sender] = pointsCorrection[turntableId][msg.sender].add(
-            int256(pointsPerShare.mul(amount))
-        );
+        turntableShares[turntableId] = turntableShares[turntableId].sub(amount);
+
+        uint256 length = rewardTokens.length;
+        for (uint256 i = 0; i < length; i = i.add(1)) {
+            address rewardToken = rewardTokens[i];
+            pointsCorrections[turntableId][msg.sender][rewardToken] = pointsCorrections[turntableId][msg.sender][rewardToken].add(
+                int256(pointsPerShares[rewardToken].mul(amount))
+            );
+        }
 
         lp.transfer(msg.sender, amount);
         emit Unlisten(turntableId, msg.sender, amount);
