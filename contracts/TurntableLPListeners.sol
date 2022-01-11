@@ -142,13 +142,19 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
             if (claimable > 0) {
                 claimed[turntableId][msg.sender][token] = claimed[turntableId][msg.sender][token].add(claimable);
                 emit Claim(turntableId, msg.sender, token, claimable);
-                uint256 fee = claimable.mul(turntableFee).div(1e4);
-                if (turntables.exists(turntableId)) {
-                    mix.transfer(turntables.ownerOf(turntableId), fee);
+
+                if(token == address(mix)) {
+                    uint256 fee = claimable.mul(turntableFee).div(1e4);
+                    if (turntables.exists(turntableId)) {
+                        mix.transfer(turntables.ownerOf(turntableId), fee);
+                    } else {
+                        mix.burn(fee);
+                    }
+                    mix.transfer(msg.sender, claimable.sub(fee));
                 } else {
-                    mix.burn(fee);
+                    IRewardToken(token).transfer(msg.sender, claimable);
                 }
-                mix.transfer(msg.sender, claimable.sub(fee));
+
                 totalClaimable = totalClaimable.add(claimable);
             }
         }
