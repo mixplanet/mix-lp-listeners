@@ -21,6 +21,7 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
     ILP public lp;
 
     address[] public rewardTokens;
+    mapping(address => bool) public isRewardToken;
 
     constructor(
         IMixEmitter _mixEmitter,
@@ -38,14 +39,17 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
 
     function addRewardToken(address token) external onlyOwner {
         rewardTokens.push(token);
+        isRewardToken[token] = true;
     }
 
     function removeRewardToken(address token) external onlyOwner {
         uint256 length = rewardTokens.length;
+        require(isRewardToken[token]);
         for (uint256 i = 0; i < length; i = i.add(1)) {
             if (rewardTokens[i] == token) {
                 rewardTokens[i] = rewardTokens[length.sub(1)];
                 rewardTokens.length -= 1;
+                delete isRewardToken[token];
                 break;
             }
         }
