@@ -38,6 +38,7 @@ contract TurntableLPListeners is Ownable, ITurntableLPListeners {
     }
 
     function addRewardToken(address token) external onlyOwner {
+        require(!isRewardToken[token]);
         rewardTokens.push(token);
         isRewardToken[token] = true;
     }
